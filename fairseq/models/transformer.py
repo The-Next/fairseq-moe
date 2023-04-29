@@ -271,6 +271,8 @@ class TransformerModel(FairseqEncoderDecoderModel):
                             help='if true use a language embedding to help moe routing in decoder')
         parser.add_argument('--use-moe-cmr', default=False, action='store_true',
                             help='if true use a share ffn in moe_layer')
+        parser.add_argument('--use-moe-cmr-group', default=False, action='store_true',
+                            help='if true use a share ffn in moe_layer and use group moe')
         parser.add_argument('--moe-cmr-dropout', type=float, default=0.0,
                             help="dropout rate for cmr gate")
         parser.add_argument('--use-cmr-lang-perception', default=False, action='store_true',
@@ -301,6 +303,11 @@ class TransformerModel(FairseqEncoderDecoderModel):
         parser.add_argument('--record-token-expert', default=False, action='store_true',
                             help="if true record token expert relations")
         # fmt: on
+
+        parser.add_argument('--group-num', default=8, type=int,
+                            help="the number of moe group")
+        parser.add_argument('--language-divide', default=None, type=str,
+                            help="language divide")
 
     @classmethod
     def build_model(cls, args, task):
@@ -663,7 +670,7 @@ class TransformerEncoder(FairseqEncoder):
         l_aux = []
         for layer in self.layers:
             x, l_aux_i = layer(
-                x, encoder_padding_mask=encoder_padding_mask if has_pads else None, lang_embeddings=src_lang_embeddings
+                x, encoder_padding_mask=encoder_padding_mask if has_pads else None, lang_embeddings=src_lang_embeddings,src_idx = src_lang_id
             )
             if return_all_hiddens:
                 assert encoder_states is not None

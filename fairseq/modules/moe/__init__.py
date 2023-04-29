@@ -7,3 +7,4 @@ from .moe_layer import MOELayer
 from .top2gate import Top2Gate
 from .top1gate import Top1Gate
 from .top2gate import top2gating
+from .moe_cmr_layer_group import CMRGroupLayer

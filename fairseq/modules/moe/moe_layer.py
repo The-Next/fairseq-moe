@@ -110,10 +110,10 @@ class MOELayer(Base):
         self.use_tutel_all2all=getattr(args, 'use_tutel_all2all', False) and has_tutel
     
 
-    def forward(self, *input: Tensor, input_padding_mask=None, **kwargs: Any) -> Tensor:
+    def forward(self, *input: Tensor, input_padding_mask=None,lang_matrix = None,langs_info , **kwargs: Any) -> Tensor:
         assert len(input) == 1, "only single input Tensor supported"
         input = input[0]
-        assert len(input.shape) == 2, "input Tensor must have dimensions: bsz*seq, dmodel"
+        assert len(input.shape) == 3, "input Tensor must have dimensions: bsz*seq, dmodel"
         # if input_padding_mask is not None:
         #     assert len(input_padding_mask.shape) == 2, "input Tensor must have dimensions: bsz,seq"
         #     assert input_padding_mask.shape[0]==input.shape[0]
@@ -122,7 +122,12 @@ class MOELayer(Base):
         # assert input.shape[0] % len(self.experts) == 0, "num tokens must be order of number of local experts"
 
         # Implement Algorithm 2 from GShard paper.
-        d_model = input.shape[1]
+        count_non_zero = None
+        if lang_matrix is not None:#屏蔽其他语言
+            input = input * lang_matrix
+            count_non_zero = torch.count_nonzero(lang_matrix).item()/512#统计张量中不为零的个数，此为实际token数
+
+        d_model = input.shape[2]
         # Pad to expected batch size
         input_shape = list(input.shape)
         expected_bsz = getattr(self.args, 'batch_size', 0) if self.training else getattr(self.args, 'batch_size_valid', 0)
@@ -132,9 +137,9 @@ class MOELayer(Base):
         expected_bsz=int(expected_bsz)
         
         # Reshape into S tokens by dropping sequence dimension.
-        reshaped_input = input #.reshape(-1, d_model)
+        reshaped_input = input.reshape(-1, d_model)
         reshaped_input_shape = reshaped_input.shape
-        #reshaped_input_padding_mask = input_padding_mask.reshape(-1) if input_padding_mask is not None else None
+        reshaped_input_padding_mask = input_padding_mask.reshape(-1) if input_padding_mask is not None else None
 
         # Doing padding here when --max-tokens is specified and not --batch-size or --max-sentences
         # Pro of --max-tokens: more flexible for MT variable sequence lengths
@@ -154,11 +159,11 @@ class MOELayer(Base):
             padded_input_padding_mask = torch.ones(
                 (expected_dim,), dtype=torch.bool, device=padded_input.device
             )
-            # if reshaped_input_padding_mask is not None:
-            #     padded_input_padding_mask[:reshaped_input_shape[0]] = reshaped_input_padding_mask
-            # else:
-            padded_input_padding_mask[:reshaped_input_shape[0]] = False
-            reshaped_input_padding_mask = padded_input_padding_mask
+            if reshaped_input_padding_mask is not None:
+                padded_input_padding_mask[:reshaped_input_shape[0]] = reshaped_input_padding_mask
+            else:
+                padded_input_padding_mask[:reshaped_input_shape[0]] = False
+                reshaped_input_padding_mask = padded_input_padding_mask
 
 
         
@@ -192,7 +197,7 @@ class MOELayer(Base):
             self._tutel_dispatcher.update(indices_, locations_, gates_, capacity=C)
             dispatched_input = self._tutel_dispatcher.encode(reshaped_input)
         else:
-            l_aux, combine_weights, dispatch_mask, self.metadata = self.gate(reshaped_input, reshaped_input_padding_mask, has_tutel=False, lang_embeddings=lang_embeddings)
+            l_aux, combine_weights, dispatch_mask, self.metadata = self.gate(reshaped_input, reshaped_input_padding_mask, has_tutel=False, lang_embeddings=lang_embeddings,count_non_zero = count_non_zero,langs_info = langs_info)
 
             dispatch_mask = dispatch_mask.to(input.dtype).permute(1, 2, 0)  # S,E,C -> E,C,S
             E, C, S = dispatch_mask.size()
@@ -226,8 +231,8 @@ class MOELayer(Base):
         
         # Remove padding here when --max-tokens is specified and not --batch-size or --max-sentences
         combined_output = combined_output[:reshaped_input_shape[0], :] # (bsz*seq, dmodel)
-        # combined_output = combined_output.reshape(input.shape) 
-        # combined_output = combined_output[:input_shape[0], :, :]
+        combined_output = combined_output.reshape(input.shape) 
+        combined_output = combined_output[:input_shape[0], :, :]
 
         self.record_all_to_all_stats()
         self.record_expert_choices(dispatch_mask[:, :, :reshaped_input_shape[0]]) # dispatch_mask: ecs

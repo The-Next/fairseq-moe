@@ -190,8 +190,11 @@ class TransformerEncoderLayer(nn.Module):
         self.normalize_before = args.encoder_normalize_before
         self.is_moe_layer = is_moe_layer
         ffn_dim = args.encoder_ffn_embed_dim
+        self.group_num = getattr(args,'group_num',8)
+        self.language_divide = getattr(args,'language_divide',None)
         if self.is_moe_layer and getattr(args, "alternate_ffn_embed_dim", 0.0) > 0:
             ffn_dim = getattr(args, "alternate_ffn_embed_dim", 0.0)
+        self.ffn_dim = ffn_dim
         # the second condition is for a "pseudo" MoE layer
         # (shared FFN with expert FFN dimension) that tries
         # to replicate FLOPs used by an expert MoE layer with perfectly balanced load
@@ -233,6 +236,12 @@ class TransformerEncoderLayer(nn.Module):
 
                 #self.cmr_gate = self.build_cmr_gate(args, self.embed_dim, self.dropout_module) # share or moe
                 #self.max_temp, self.min_temp, self.temp_decay = [float(x) for x in args.moe_cmr_temp.split(",")]
+            elif args.use_moe_cmr_group:
+                from fairseq.modules.moe.moe_cmr_layer_group import CMRGroupLayer
+                self.share_expert = self.build_share_ffn(
+                        args, self.embed_dim, ffn_dim, self.dropout_module
+                    )
+                self.moe_module = CMRGroupLayer(self.moe_layer, self.share_expert, self.embed_dim, getattr(args, "moe_cmr_dropout", 0.0), use_cmr_lang_perception=getattr(args, "use_cmr_lang_perception", False),language_divide = self.language_divide)
             else:
                 self.moe_module = self.moe_layer
 
@@ -317,6 +326,7 @@ class TransformerEncoderLayer(nn.Module):
                 encoder_padding_mask: Optional[Tensor],
                 attn_mask: Optional[Tensor] = None,
                 lang_embeddings: Optional[Tensor] = None,
+                src_idx = None,
             ):
         """
         Args:
@@ -387,13 +397,13 @@ class TransformerEncoderLayer(nn.Module):
                 x = x[nonpadding] # drop pad token
                 if lang_embeddings is not None:
                     lang_embeddings = lang_embeddings[nonpadding]
-            else:
-                # reshape x into (bsz*seq, dmodel)
-                x = x.reshape(-1, x.shape[-1])
-                if lang_embeddings is not None:
-                    lang_embeddings = lang_embeddings.reshape(-1, x.shape[-1])
+            # else:
+            #     # reshape x into (bsz*seq, dmodel)
+            #     x = x.reshape(-1, x.shape[-1])
+            #     if lang_embeddings is not None:
+            #         lang_embeddings = lang_embeddings.reshape(-1, x.shape[-1])
  
-            x, l_aux = self.moe_module(x, lang_embeddings=lang_embeddings)
+            x, l_aux = self.moe_module(x, lang_embeddings=lang_embeddings,lang_idx = src_idx)
 
             if encoder_padding_mask is not None:
                 new_x = torch.zeros(x_shape, device=x.device, dtype=x.dtype)
