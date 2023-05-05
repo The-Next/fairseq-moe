@@ -457,6 +457,8 @@ class TransformerDecoderLayer(nn.Module):
         )
 
         self.normalize_before = args.decoder_normalize_before
+        self.group_num = getattr(args,'group_num',8)
+        self.language_divide = getattr(args,'language_divide',None)
 
         # use layerNorm rather than FusedLayerNorm for exporting.
         # char_inputs can be used to determint this.
@@ -517,6 +519,13 @@ class TransformerDecoderLayer(nn.Module):
 
                 #self.cmr_gate = self.build_cmr_gate(args, self.embed_dim, self.dropout_module) # share or moe
                 #self.max_temp, self.min_temp, self.temp_decay = [float(x) for x in args.moe_cmr_temp.split(",")]
+            elif args.use_moe_cmr_group:
+                from fairseq.modules.moe.moe_cmr_layer_group import CMRGroupLayer
+                self.share_expert = self.build_share_ffn(
+                        args, self.embed_dim, ffn_dim, self.dropout_module
+                    )
+                self.moe_module = CMRGroupLayer(self.moe_layer, self.share_expert, self.embed_dim, getattr(args, "moe_cmr_dropout", 0.0), use_cmr_lang_perception=getattr(args, "use_cmr_lang_perception", False),language_divide = self.language_divide)
+
             else:
                 self.moe_module = self.moe_layer
 
@@ -611,6 +620,7 @@ class TransformerDecoderLayer(nn.Module):
         need_attn: bool = False,
         need_head_weights: bool = False,
         lang_embeddings: Optional[Tensor] = None,
+        tgt_idx = None,
     ):
         """
         Args:
@@ -752,25 +762,25 @@ class TransformerDecoderLayer(nn.Module):
             if lang_embeddings is not None:
                 lang_embeddings = lang_embeddings.expand(x_shape)
             # drop pad token
-            if self.training and self_attn_padding_mask is not None:
-                nonpadding =~self_attn_padding_mask.bool()
-                x = x[nonpadding] # drop pad token
-                if lang_embeddings is not None:
-                    lang_embeddings = lang_embeddings[nonpadding]
-            else:
-                # reshape x into (bsz*seq, dmodel)
-                x = x.reshape(-1, x.shape[-1])
-                if lang_embeddings is not None:
-                    lang_embeddings = lang_embeddings.reshape(-1, x.shape[-1])
+            # if self.training and self_attn_padding_mask is not None:
+            #     nonpadding =~self_attn_padding_mask.bool()
+            #     x = x[nonpadding] # drop pad token
+            #     if lang_embeddings is not None:
+            #         lang_embeddings = lang_embeddings[nonpadding]
+            # else:
+            #     # reshape x into (bsz*seq, dmodel)
+            #     x = x.reshape(-1, x.shape[-1])
+            #     if lang_embeddings is not None:
+            #         lang_embeddings = lang_embeddings.reshape(-1, x.shape[-1])
 
-            x, l_aux = self.moe_module(x, lang_embeddings=lang_embeddings)
+            x, l_aux = self.moe_module(x, lang_embeddings=lang_embeddings,lang_idx = tgt_idx)
 
-            if self.training and self_attn_padding_mask is not None:
-                new_x = torch.zeros(x_shape, device=x.device, dtype=x.dtype)
-                new_x[~self_attn_padding_mask.bool()] = x
-                x = new_x
-            else:
-                x = x.reshape(x_shape)
+            # if self.training and self_attn_padding_mask is not None:
+            #     new_x = torch.zeros(x_shape, device=x.device, dtype=x.dtype)
+            #     new_x[~self_attn_padding_mask.bool()] = x
+            #     x = new_x
+            # else:
+            #     x = x.reshape(x_shape)
 
             x = x.transpose(0, 1) # seq_len, batch_size, model_dim
         x = self.residual_connection(x, residual)

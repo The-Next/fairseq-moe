@@ -67,6 +67,10 @@ def top2gating(
     eom_dropout_module=None,
     count_non_zero = None,
     langs_info = None,
+    lang_list = None,
+    lang_idx = None,
+    reshape_input_len = None,
+    expected_dim = None,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     """Implements Top2Gating on logits."""
     if has_tutel:
@@ -99,26 +103,38 @@ def top2gating(
     #     gates = lp_mask * gates
 
     # else:
+    for lang_id in lang_list:
+        lang_mask = (lang_idx == lang_id).unsqueeze(-1).repeat([1,int(reshape_input_len/lang_idx.size(0))]).reshape(-1)#语言索引
+        lang_mask_shape = lang_mask.shape
+        padded_input = torch.zeros(
+                (expected_dim),
+                dtype=logits.dtype, layout=logits.layout, device=logits.device)
+        padded_input[:lang_mask_shape[0]] = lang_mask
+        lang_mask = padded_input.bool()
+        logits[lang_mask] = logits[lang_mask].masked_fill(~langs_info[str(lang_id)]['mask'].unsqueeze(0).repeat([lang_mask.sum(),1]), float("-inf"))      
+    
+
     gates = F.softmax(logits, dim=1)
-    if count_non_zero is not None:#这里仅仅是判定
-        divide = eval(langs_info['divide'])#当前语言可见区间
-        now_num_experts = divide[1] - divide[0]#当前语言可见专家数
-        gates[:,0:divide[0]] = float('-inf')#可见区间之前部分调整为不可见
-        gates[:,divide[1]:] = float('-inf')#可见区间之后部分调整为不可见
+    # if count_non_zero is not None:#这里仅仅是判定
+    #     divide = eval(langs_info['divide'])#当前语言可见区间
+    #     now_num_experts = divide[1] - divide[0]#当前语言可见专家数
+    #     gates[:,0:divide[0]] = float('-inf')#可见区间之前部分调整为不可见
+    #     gates[:,divide[1]:] = float('-inf')#可见区间之后部分调整为不可见
 
         
     metadata["entropy_gating"] = entropy(probs=gates).mean().detach()
     # gates has shape of SE
     num_tokens = gates.shape[0]
     num_experts = gates.shape[1]
-    if count_non_zero is not None:#为了有足够的容量，容量计算参考当前可用token和可见专家数
-        capacity = int(2 * math.ceil(count_non_zero / now_num_experts) * capacity_factor)
+    
+    # if count_non_zero is not None:#为了有足够的容量，容量计算参考当前可用token和可见专家数
+    #     capacity = int(2 * math.ceil(count_non_zero / now_num_experts) * capacity_factor)
+    # else:
+    if moe_eval_capacity_token_fraction > 0.0 and eval_mode:
+        capacity = math.ceil(moe_eval_capacity_token_fraction * num_tokens)
     else:
-        if moe_eval_capacity_token_fraction > 0.0 and eval_mode:
-            capacity = math.ceil(moe_eval_capacity_token_fraction * num_tokens)
-        else:
-            # capacity = 2S/E
-            capacity = int(2 * math.ceil(num_tokens / num_experts) * capacity_factor)
+        # capacity = 2S/E
+        capacity = int(2 * math.ceil(num_tokens / num_experts) * capacity_factor)
 
     # Create a mask for 1st's expert per token
     indices1_s = torch.argmax(gates, dim=1, keepdim=True)
@@ -129,12 +145,15 @@ def top2gating(
         logits_w_noise = logits + gumbel_rsample(logits.shape, device=logits.device)
     else:
         logits_w_noise = logits
+    # assert 1 == 0
     # Replace top-expert with min value
     logits_except1 = logits_w_noise.masked_fill(mask1.bool(), float("-inf"))
     indices2_s = torch.argmax(logits_except1, dim=1, keepdim=True)
     mask2 = one_hot(indices2_s, num_experts)
-    gates1_s = (torch.where(gates == float('-inf'),torch.tensor(0.0).to(gates.dtype).cuda(),gates) * mask1).sum(dim=1)#这里会出现一个数值计算的问题，inf*0会变成nan
-    gates2_s = (torch.where(gates == float('-inf'),torch.tensor(0.0).to(gates.dtype).cuda(),gates) * mask2).sum(dim=1)#将inf转化为0再计算
+    # gates1_s = (torch.where(gates == float('-inf'),torch.tensor(0.0).to(gates.dtype).cuda(),gates) * mask1).sum(dim=1)#这里会出现一个数值计算的问题，inf*0会变成nan
+    # gates2_s = (torch.where(gates == float('-inf'),torch.tensor(0.0).to(gates.dtype).cuda(),gates) * mask2).sum(dim=1)#将inf转化为0再计算
+    gates1_s = (gates * mask1)
+    gates2_s = (gates * mask2)
 
     if normalize_gate_prob_before_dropping:
         # Normalize gate probabilities
@@ -178,7 +197,8 @@ def top2gating(
     me = torch.mean(torch.where(gates == float('-inf'),torch.tensor(0.0).to(gates.dtype).cuda(),gates), dim=0)#inf转换为0，否则计算有影响
     ce = torch.mean(mask1.to(gates.dtype), dim=0)
     l_aux = torch.mean(me * ce)
-    l_aux = l_aux * num_experts * num_experts
+    l_aux = l_aux * num_experts * num_experts#这里应该是可见专家数
+    # l_aux = l_aux * now_num_experts * now_num_experts
     # balance load loss for language perception
     # if lp_logits is not None:
     #     me_lp = torch.mean(lp_gates, dim=0)
@@ -217,8 +237,10 @@ def top2gating(
 
     if not normalize_gate_prob_before_dropping:
         # Normalize gate probabilities
-        gates1_s = (torch.where(gates == float('-inf'),torch.tensor(0.0).to(gates.dtype).cuda(),gates) * mask1).sum(dim=1)
-        gates2_s = (torch.where(gates == float('-inf'),torch.tensor(0.0).to(gates.dtype).cuda(),gates) * mask2).sum(dim=1)
+        # gates1_s = (torch.where(gates == float('-inf'),torch.tensor(0.0).to(gates.dtype).cuda(),gates) * mask1).sum(dim=1)
+        # gates2_s = (torch.where(gates == float('-inf'),torch.tensor(0.0).to(gates.dtype).cuda(),gates) * mask2).sum(dim=1)
+        gates1_s = (gates * mask1).sum(dim=1)
+        gates2_s = (gates * mask2).sum(dim=1)
         denom_s = gates1_s + gates2_s
         # Avoid divide-by-zero
         denom_s = torch.clamp(denom_s, min=torch.finfo(denom_s.dtype).eps)
@@ -327,7 +349,7 @@ class Top2Gate(torch.nn.Module):
     def set_num_updates(self, num_updates):
         self.num_updates = num_updates
 
-    def forward(self, input: torch.Tensor=None, mask: Optional[torch.Tensor] = None, has_tutel=False, logits:torch.Tensor=None, lang_embeddings:torch.Tensor=None, sentence_embeddings:torch.Tensor=None,count_non_zero=None,langs_info = None) -> Tuple[Tensor, Tensor, Tensor]:  # type: ignore
+    def forward(self, input: torch.Tensor=None, mask: Optional[torch.Tensor] = None, has_tutel=False, logits:torch.Tensor=None, lang_embeddings:torch.Tensor=None, sentence_embeddings:torch.Tensor=None,count_non_zero=None,langs_info = None, lang_list = None,lang_idx = None,lenght = None,reshape_input_len = None,expected_dim = None) -> Tuple[Tensor, Tensor, Tensor]:  # type: ignore
         if logits is None:
             if self.use_moe_lang_perception:
                 assert lang_embeddings is not None
@@ -349,5 +371,9 @@ class Top2Gate(torch.nn.Module):
             has_tutel=has_tutel,
             eom_dropout_module=self.eom_dropout_module,
             count_non_zero = count_non_zero,
-            langs_info = langs_info
+            langs_info = langs_info,
+            lang_list = lang_list,
+            lang_idx = lang_idx,
+            reshape_input_len = reshape_input_len,
+            expected_dim = expected_dim,
             )

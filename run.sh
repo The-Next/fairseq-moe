@@ -1,5 +1,5 @@
 NUM_EXPERTS=32
-max_tokens=2048
+max_tokens=1024
 max_updates=50000
 # #DATA="/data/lsj/nfs/it_experiment/data/general_data/text_data/enfr"
 DATA="/home/sxy/Projects/data_pre/data/data/opus-100-corpus/preprocessed_data/main_data_bin"
@@ -21,7 +21,7 @@ python train.py $DATA \
   --share-all-embeddings \
   --encoder-normalize-before --decoder-normalize-before \
   --encoder-layers 3 --decoder-layers 3 \
-  --encoder-embed-dim 128 --encoder-ffn-embed-dim 256 \
+  --encoder-embed-dim 128 --encoder-ffn-embed-dim 128 \
   --max-source-positions 512 --max-target-positions 512 \
   --encoder-attention-heads 8 --decoder-attention-heads 8 \
   --moe-expert-count $NUM_EXPERTS --moe-freq 2 \

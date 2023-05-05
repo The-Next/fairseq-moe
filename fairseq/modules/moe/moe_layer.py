@@ -110,10 +110,10 @@ class MOELayer(Base):
         self.use_tutel_all2all=getattr(args, 'use_tutel_all2all', False) and has_tutel
     
 
-    def forward(self, *input: Tensor, input_padding_mask=None,lang_matrix = None,langs_info , **kwargs: Any) -> Tensor:
+    def forward(self, *input: Tensor, input_padding_mask=None,lang_matrix = None,langs_info = None,lang_list = None,lang_idx = None, **kwargs: Any) -> Tensor:
         assert len(input) == 1, "only single input Tensor supported"
         input = input[0]
-        assert len(input.shape) == 3, "input Tensor must have dimensions: bsz*seq, dmodel"
+        assert len(input.shape) == 3, "input Tensor must have dimensions: bsz,seq, dmodel"
         # if input_padding_mask is not None:
         #     assert len(input_padding_mask.shape) == 2, "input Tensor must have dimensions: bsz,seq"
         #     assert input_padding_mask.shape[0]==input.shape[0]
@@ -122,11 +122,12 @@ class MOELayer(Base):
         # assert input.shape[0] % len(self.experts) == 0, "num tokens must be order of number of local experts"
 
         # Implement Algorithm 2 from GShard paper.
-        count_non_zero = None
-        if lang_matrix is not None:#屏蔽其他语言
-            input = input * lang_matrix
-            count_non_zero = torch.count_nonzero(lang_matrix).item()/512#统计张量中不为零的个数，此为实际token数
-
+        # count_non_zero = None
+        # if lang_matrix is not None:#屏蔽其他语言
+        #     input = input * lang_matrix
+        #     count_non_zero = torch.count_nonzero(lang_matrix).clone().item()/512#统计张量中不为零的个数，此为实际token数
+            
+            # count_non_zero = (lang_matrix != 0).sum().item()
         d_model = input.shape[2]
         # Pad to expected batch size
         input_shape = list(input.shape)
@@ -135,6 +136,7 @@ class MOELayer(Base):
         if expected_bsz is None:
             expected_bsz = 0
         expected_bsz=int(expected_bsz)
+        # print('ip',input.shape,input.device)
         
         # Reshape into S tokens by dropping sequence dimension.
         reshaped_input = input.reshape(-1, d_model)
@@ -144,6 +146,7 @@ class MOELayer(Base):
         # Doing padding here when --max-tokens is specified and not --batch-size or --max-sentences
         # Pro of --max-tokens: more flexible for MT variable sequence lengths
         # Con of --max-tokens: extra all-reduce needed to figure out optimal padding without running OOM
+        reshape_input_len = reshaped_input_shape[0]
         if expected_bsz == 0:
             expected_dim = int(distributed_utils.all_reduce(
                 reshaped_input_shape[0] * torch.ones((1,), dtype=torch.long, device=input.device),
@@ -197,7 +200,7 @@ class MOELayer(Base):
             self._tutel_dispatcher.update(indices_, locations_, gates_, capacity=C)
             dispatched_input = self._tutel_dispatcher.encode(reshaped_input)
         else:
-            l_aux, combine_weights, dispatch_mask, self.metadata = self.gate(reshaped_input, reshaped_input_padding_mask, has_tutel=False, lang_embeddings=lang_embeddings,count_non_zero = count_non_zero,langs_info = langs_info)
+            l_aux, combine_weights, dispatch_mask, self.metadata = self.gate(reshaped_input, reshaped_input_padding_mask, has_tutel=False, lang_embeddings=lang_embeddings,langs_info = langs_info,lang_list = lang_list,lang_idx = lang_idx,reshape_input_len = reshape_input_len,expected_dim = expected_dim)
 
             dispatch_mask = dispatch_mask.to(input.dtype).permute(1, 2, 0)  # S,E,C -> E,C,S
             E, C, S = dispatch_mask.size()

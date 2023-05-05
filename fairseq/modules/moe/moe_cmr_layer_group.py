@@ -5,8 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 from typing import Any, Callable, Dict, Optional, Tuple
-
+import numpy as np
 import torch
+# torch.set_printoptions(threshold=np.inf)
 import torch.nn.functional as F
 import json
 
@@ -60,6 +61,12 @@ class CMRGroupLayer(torch.nn.Module):
         if self.group_dict is not None:
             with open(self.group_dict,'r',encoding='utf-8') as fp:
                 data = json.load(fp)
+            for key in data:
+                item = torch.ones_like(torch.empty(32))
+                divide = eval(data[key]['divide'])#当前语言可见区间
+                item[divide[0]:divide[1]] = 0 #可见区域设置为0
+                data[key]['mask'] = item.bool().cuda().clone()
+
             self.dict = data
 
     def forward(
@@ -80,34 +87,41 @@ class CMRGroupLayer(torch.nn.Module):
         
         
         lang_list = list(set(lang_idx.tolist()))
-        final_x_moe = torch.zeros_like(input[0],dtype = input[0].dtype)
-        for lang_id in lang_list:
-            lang_id_mask = torch.eq(lang_idx,lang_id)#制作掩码矩阵
-            lang_id_mask = lang_id_mask.unsqueeze(-1)#[b,1]
-            step1 = lang_id_mask.repeat([1,input[0].size(1)])#[b,len]
-            step1 = step1.unsqueeze(-1)#[b,len,1]
-            step2 = step1.repeat([1,1,input[0].size(-1)])#[b,len,d]
+        # final_x_moe = torch.zeros_like(input[0],dtype = input[0].dtype)
+        # final_l_aus = {}
+        # final_l_aus['moe_gate_loss'] = torch.tensor(0.0).to(gates.dtype)
+        
+        # for lang_id in lang_list:
+        #     lang_id_mask = torch.eq(lang_idx,lang_id)#制作掩码矩阵
+        #     lang_id_mask = lang_id_mask.unsqueeze(-1)#[b,1]
+        #     step1 = lang_id_mask.repeat([1,input[0].size(1)])#[b,len]
+        #     step1 = step1.unsqueeze(-1)#[b,len,1]
+        #     step2 = step1.repeat([1,1,input[0].size(-1)])#[b,len,d]
 
-            lang_matrix = step2#[b,len,d]
-            x_moe,l_aux = self.moe_layer(
-                *input,input_padding_mask = input_padding_mask,lang_matrix = lang_matrix,langs_info = self.dict[str(lang_id)],**kwargs
-            )
-            final_x_moe = final_x_moe + x_moe
+        #     lang_matrix = step2#[b,len,d]
+        x_moe,l_aux = self.moe_layer(
+            *input,input_padding_mask = input_padding_mask,lang_list = lang_list,lang_idx = lang_idx,langs_info = self.dict,**kwargs
+        )
+            # final_x_moe = final_x_moe + x_moe
+            # final_l_aus['moe_gate_loss'] = final_l_aus['moe_gate_loss'] + l_aux['moe_gate_loss']
+            # print(l_aux)
+            # assert 1 == 0
         # x_moe, l_aux = self.moe_layer(
         #     *input, input_padding_mask=input_padding_mask, **kwargs
         # )
-        print('fin',final_x_moe)
-        assert 1 == 0
+        # print('finaus',final_l_aus['moe_gate_loss'].device)
+        # print('fin',final_x_moe.device)
+        # assert 1 == 0
 
         x_ffn = self.ffn_fn(*input)
 
         share_gates = self.gate.dropout(1 - gates)
         moe_gates = self.gate.dropout(gates)
-        x_out = x_ffn * share_gates.unsqueeze(-1) + x_moe * moe_gates.unsqueeze(-1)
+        x_out = x_ffn * share_gates.unsqueeze(-1) + x_moe  * moe_gates.unsqueeze(-1)
 
         if input_padding_mask is None:
-            input_padding_mask = torch.zeros_like(input[0][:, 0], dtype=torch.bool)
-
+            input_padding_mask = torch.zeros_like(input[0][:, :, 0], dtype=torch.bool)
+        
         used_budget = (gates * (~input_padding_mask)).sum()
         total_budget = (~input_padding_mask).sum()
 
